@@ -1,0 +1,91 @@
+
+# ─────────────────────────────────────────────────────────────
+# ToolVault Pro — Slack App Manifest
+#
+# HOW TO USE:
+# 1. Go to https://api.slack.com/apps
+# 2. Click "Create New App"
+# 3. Choose "From an app manifest"
+# 4. Select your workspace
+# 5. Paste the JSON below (switch to JSON tab)
+# 6. Click "Next" → "Create"
+# ─────────────────────────────────────────────────────────────
+
+{
+  "display_information": {
+    "name": "ToolVault Pro",
+    "description": "Track, check out, and check in construction tools directly from Slack.",
+    "background_color": "#18181b",
+    "long_description": "ToolVault Pro lets your team manage tool inventory without leaving Slack. Foremen and subcontractors can check tools in and out, flag damage, and view overdue rentals — all through simple slash commands and interactive forms."
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "ToolVault Pro",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/tv-status",
+        "description": "Dashboard: tool stats, overdue alerts, quick actions",
+        "usage_hint": "",
+        "should_escape": false
+      },
+      {
+        "command": "/tv-tools",
+        "description": "List tools — add 'available', 'damaged', or a search term",
+        "usage_hint": "[available | damaged | search term]",
+        "should_escape": false
+      },
+      {
+        "command": "/tv-checkout",
+        "description": "Check out a tool to an employee or subcontractor",
+        "usage_hint": "",
+        "should_escape": false
+      },
+      {
+        "command": "/tv-checkin",
+        "description": "Return a tool and log its condition",
+        "usage_hint": "",
+        "should_escape": false
+      },
+      {
+        "command": "/tv-rentals",
+        "description": "View all currently checked out tools",
+        "usage_hint": "",
+        "should_escape": false
+      },
+      {
+        "command": "/tv-overdue",
+        "description": "View all overdue tool returns",
+        "usage_hint": "",
+        "should_escape": false
+      },
+      {
+        "command": "/tv-help",
+        "description": "Show all ToolVault commands",
+        "usage_hint": "",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "chat:write.public",
+        "commands",
+        "im:write",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://YOUR-DOMAIN.com/slack/interactions"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

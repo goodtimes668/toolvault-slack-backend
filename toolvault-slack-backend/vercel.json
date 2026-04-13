@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/server.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/server.js"
+    }
+  ],
+  "env": {
+    "SLACK_SIGNING_SECRET": "@slack_signing_secret",
+    "SLACK_BOT_TOKEN": "@slack_bot_token",
+    "SLACK_MANAGER_CHANNEL_ID": "@slack_manager_channel_id",
+    "DB_PATH": "/tmp/db.json"
+  }
+}
