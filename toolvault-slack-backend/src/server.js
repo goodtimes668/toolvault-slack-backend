@@ -29,7 +29,7 @@ app.use((_req, res) => { res.status(404).json({ error: "Not found" }); });
 app.use((err, _req, res, _next) => { console.error(err.message); res.status(500).json({ error: "Internal server error" }); });
 
 app.listen(PORT, () => {
-  console.log(`ToolVault Pro running on port ${PORT}`);
+  console.log("ToolVault Pro running on port " + PORT);
   if (process.env.SLACK_MANAGER_CHANNEL_ID) startOverdueChecker();
 });
 
