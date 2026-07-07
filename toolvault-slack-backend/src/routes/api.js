@@ -17,6 +17,36 @@ router.put("/alerts/read-all", (_req, res) => { const low = require("lowdb"); co
 router.get("/stats", (_req, res) => { res.json(db.getStats()); });
 router.get("/manager", (_req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); res.json({ name: d.get("managerName").value() || "Site Manager" }); });
 router.put("/manager", (req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); d.set("managerName", req.body.name).write(); res.json({ name: req.body.name }); });
+// ─── JOB SITES ────────────────────────────────────────
+router.get("/sites", (_req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  res.json(d.get("sites").value() || []);
+});
+
+router.post("/sites", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  if (!d.has("sites").value()) d.set("sites", []).write();
+  d.get("sites").push(req.body).write();
+  res.status(201).json(req.body);
+});
+
+router.put("/sites/:name", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  const site = d.get("sites").find({ name: decodeURIComponent(req.params.name) }).value();
+  if (!site) return res.status(404).json({ error: "Site not found" });
+  d.get("sites").find({ name: decodeURIComponent(req.params.name) }).assign(req.body).write();
+  res.json(d.get("sites").find({ name: req.body.name || decodeURIComponent(req.params.name) }).value());
+});
+
+router.delete("/sites/:name", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  d.get("sites").remove({ name: decodeURIComponent(req.params.name) }).write();
+  res.json({ deleted: true });
+});
 
 // ─── DISPATCH BOOKINGS ────────────────────────────────────────
 router.get("/bookings", (_req, res) => {
