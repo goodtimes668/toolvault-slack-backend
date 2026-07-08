@@ -17,6 +17,7 @@ router.put("/alerts/read-all", (_req, res) => { const low = require("lowdb"); co
 router.get("/stats", (_req, res) => { res.json(db.getStats()); });
 router.get("/manager", (_req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); res.json({ name: d.get("managerName").value() || "Site Manager" }); });
 router.put("/manager", (req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); d.set("managerName", req.body.name).write(); res.json({ name: req.body.name }); });
+
 // ─── JOB SITES ────────────────────────────────────────
 router.get("/sites", (_req, res) => {
   const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
@@ -48,6 +49,28 @@ router.delete("/sites/:name", (req, res) => {
   res.json({ deleted: true });
 });
 
+// ─── SLACK NOTIFY HELPERS ─────────────────────────────
+async function getBrentDmChannel(slackToken) {
+  const userId = process.env.BRENT_SLACK_ID;
+  if (!userId) return null;
+  try {
+    const r = await fetch("https://slack.com/api/conversations.open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+      body: JSON.stringify({ users: userId })
+    });
+    const data = await r.json();
+    if (data.ok) return data.channel.id;
+    console.error("[slack] conversations.open failed:", data.error);
+    return null;
+  } catch (e) {
+    console.error("[slack] conversations.open error:", e.message);
+    return null;
+  }
+}
+
+const TYPE_LABEL = { delivery: "Material Delivery", pickup: "Tool Pickup", "tool-delivery": "Tool Delivery", misc: "Misc Task" };
+
 // ─── DISPATCH BOOKINGS ────────────────────────────────────────
 router.get("/bookings", (_req, res) => {
   const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
@@ -61,36 +84,43 @@ router.post("/bookings", (req, res) => {
   const booking = { id: uid(), status: "pending", createdAt: new Date().toISOString(), ...req.body };
   if (!d.has("bookings").value()) d.set("bookings", []).write();
   d.get("bookings").push(booking).write();
-  // Slack notification to Brent
+
   const slackToken = process.env.SLACK_BOT_TOKEN;
-  const brentChannel = process.env.BRENT_SLACK_ID || process.env.SLACK_MANAGER_CHANNEL_ID;
-  if (slackToken && brentChannel) {
-    const typeEmoji = { delivery:"📦", pickup:"🔧", "tool-delivery":"🚚", misc:"📝" }[booking.type] || "📋";
-    const priorityText = booking.priority === "urgent" ? "🚨 *URGENT*" : booking.priority === "scheduled" ? "📅 Planned" : "📋 Normal";
-    fetch("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
-      body: JSON.stringify({
-        channel: brentChannel,
-        text: `${typeEmoji} New booking request from ${booking.requester}`,
-        blocks: [
-          { type: "header", text: { type: "plain_text", text: `${typeEmoji} New Dispatch Request` } },
-          { type: "section", fields: [
-            { type: "mrkdwn", text: `*Type:*\n${booking.type}` },
-            { type: "mrkdwn", text: `*From:*\n${booking.requester}` },
-            { type: "mrkdwn", text: `*Site:*\n${booking.site || "TBD"}` },
-            { type: "mrkdwn", text: `*Date:*\n${booking.date}${booking.time ? " at " + booking.time : ""}` },
-            { type: "mrkdwn", text: `*Priority:*\n${priorityText}` },
-          ]},
-          { type: "section", text: { type: "mrkdwn", text: `*Description:*\n${booking.description}` } },
-          { type: "actions", elements: [
-            { type: "button", text: { type: "plain_text", text: "✅ Approve" }, style: "primary", action_id: "approve_booking", value: booking.id },
-            { type: "button", text: { type: "plain_text", text: "❌ Decline" }, style: "danger", action_id: "decline_booking", value: booking.id },
-          ]}
-        ]
-      })
-    }).catch(() => {});
+  if (slackToken) {
+    getBrentDmChannel(slackToken).then((brentChannel) => {
+      const channel = brentChannel || process.env.SLACK_MANAGER_CHANNEL_ID;
+      if (!channel) return;
+      const typeLabel = TYPE_LABEL[booking.type] || booking.type;
+      const typeEmoji = { delivery:"📦", pickup:"🔧", "tool-delivery":"🚚", misc:"📝" }[booking.type] || "📋";
+      const priorityText = booking.priority === "urgent" ? "🚨 *URGENT*" : booking.priority === "scheduled" ? "📅 Planned" : "📋 Normal";
+      return fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+        body: JSON.stringify({
+          channel: channel,
+          text: `${typeEmoji} New booking request from ${booking.requester}`,
+          blocks: [
+            { type: "header", text: { type: "plain_text", text: `${typeEmoji} New Dispatch Request` } },
+            { type: "section", fields: [
+              { type: "mrkdwn", text: `*Type:*\n${typeLabel}` },
+              { type: "mrkdwn", text: `*From:*\n${booking.requester}` },
+              { type: "mrkdwn", text: `*Site:*\n${booking.site || "TBD"}` },
+              { type: "mrkdwn", text: `*Date:*\n${booking.date}${booking.time ? " at " + booking.time : ""}` },
+              { type: "mrkdwn", text: `*Priority:*\n${priorityText}` },
+            ]},
+            { type: "section", text: { type: "mrkdwn", text: `*Description:*\n${booking.description}` } },
+            { type: "actions", elements: [
+              { type: "button", text: { type: "plain_text", text: "✅ Approve" }, style: "primary", action_id: "approve_booking", value: booking.id },
+              { type: "button", text: { type: "plain_text", text: "❌ Decline" }, style: "danger", action_id: "decline_booking", value: booking.id },
+            ]}
+          ]
+        })
+      }).then(r => r.json()).then(data => {
+        if (!data.ok) console.error("[slack] chat.postMessage (new booking) failed:", data.error);
+      });
+    }).catch(e => console.error("[slack] notify new booking error:", e.message));
   }
+
   res.status(201).json(booking);
 });
 
@@ -101,22 +131,25 @@ router.put("/bookings/:id", (req, res) => {
   if (!booking) return res.status(404).json({ error: "Booking not found" });
   d.get("bookings").find({ id: req.params.id }).assign({ ...req.body, updatedAt: new Date().toISOString() }).write();
   const updated = d.get("bookings").find({ id: req.params.id }).value();
-  // Notify requester channel on status change
+
   const slackToken = process.env.SLACK_BOT_TOKEN;
   const channel = process.env.SLACK_MANAGER_CHANNEL_ID;
   if (slackToken && channel && req.body.status) {
+    const typeLabel = TYPE_LABEL[booking.type] || booking.type;
     const msgs = {
-      approved: `✅ Booking approved by Brent: ${booking.type} for ${booking.site} on ${booking.date}`,
-      declined: `❌ Booking declined: ${booking.type} for ${booking.site}${req.body.brentNotes ? " — " + req.body.brentNotes : ""}`,
-      completed: `🏁 Job completed by Brent: ${booking.type} for ${booking.site}`,
-      "in-progress": `🔄 Brent is on the way: ${booking.type} for ${booking.site}`
+      approved: `✅ Booking approved by Brent: ${typeLabel} for ${booking.site} on ${booking.date}`,
+      declined: `❌ Booking declined: ${typeLabel} for ${booking.site}${req.body.brentNotes ? " — " + req.body.brentNotes : ""}`,
+      completed: `🏁 Job completed by Brent: ${typeLabel} for ${booking.site}`,
+      "in-progress": `🔄 Brent is on the way: ${typeLabel} for ${booking.site}`
     };
     if (msgs[req.body.status]) {
       fetch("https://slack.com/api/chat.postMessage", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
         body: JSON.stringify({ channel, text: msgs[req.body.status] })
-      }).catch(() => {});
+      }).then(r => r.json()).then(data => {
+        if (!data.ok) console.error("[slack] chat.postMessage (status update) failed:", data.error);
+      }).catch(e => console.error("[slack] notify status update error:", e.message));
     }
   }
   res.json(updated);
