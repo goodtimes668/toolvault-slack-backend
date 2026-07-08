@@ -1,108 +1,165 @@
-// src/slack/api.js
-// ─────────────────────────────────────────────────────────────
-// Wrapper around the Slack Web API.
-// Uses the bot token to post messages and open modals.
-// ─────────────────────────────────────────────────────────────
-const axios = require("axios");
-const SLACK_API = "https://slack.com/api";
+const express = require("express");
+const router = express.Router();
+const db = require("../db/store");
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
-function getHeaders() {
-  return {
-    Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
-    "Content-Type": "application/json",
-  };
-}
+router.get("/tools", (_req, res) => { res.json(db.getAllTools()); });
+router.post("/tools", (req, res) => { const tool = { id: uid(), damageFlagged: false, ...req.body }; db.addTool(tool); res.status(201).json(tool); });
+router.put("/tools/:id", (req, res) => { const tool = db.getToolById(req.params.id); if (!tool) return res.status(404).json({ error: "Tool not found" }); res.json(db.updateTool(req.params.id, req.body)); });
+router.delete("/tools/:id", (req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); d.get("tools").remove({ id: req.params.id }).write(); res.json({ deleted: true }); });
+router.get("/rentals", (_req, res) => { res.json(db.getAllRentals()); });
+router.post("/rentals", (req, res) => { const rental = { id: uid(), status: "active", createdAt: new Date().toISOString(), ...req.body }; db.addRental(rental); if (rental.toolId && rental.jobSite) db.updateTool(rental.toolId, { jobSite: rental.jobSite }); res.status(201).json(rental); });
+router.put("/rentals/:id", (req, res) => { const rental = db.getRentalById(req.params.id); if (!rental) return res.status(404).json({ error: "Not found" }); const updated = db.updateRental(req.params.id, req.body); if (req.body.status === "returned" && rental.toolId) { db.updateTool(rental.toolId, { condition: req.body.returnCondition || rental.checkoutCondition, damageFlagged: req.body.damageFlagged || false, jobSite: "" }); if (req.body.damageFlagged) { const tool = db.getToolById(rental.toolId) || {}; db.addAlert({ id: uid(), type: "damage", message: `${tool.name||"Tool"} returned with damage by ${rental.checkedOutBy}. ${req.body.damageDesc||""}`, date: new Date().toISOString(), read: false }); } } res.json(updated); });
+router.get("/categories", (_req, res) => { res.json(db.getCategories()); });
+router.put("/categories", (req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); d.set("categories", req.body.categories).write(); res.json(req.body.categories); });
+router.get("/alerts", (_req, res) => { res.json(db.getAlerts()); });
+router.put("/alerts/read-all", (_req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); d.get("alerts").each(a => { a.read = true; }).write(); res.json({ ok: true }); });
+router.get("/stats", (_req, res) => { res.json(db.getStats()); });
+router.get("/manager", (_req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); res.json({ name: d.get("managerName").value() || "Site Manager" }); });
+router.put("/manager", (req, res) => { const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync"); const d = low(new FileSync(process.env.DB_PATH||"./data/db.json")); d.set("managerName", req.body.name).write(); res.json({ name: req.body.name }); });
 
-// Cache resolved user-ID -> DM-channel-ID lookups for this process's
-// lifetime. Avoids an extra Slack API round-trip on every message sent
-// to the same person (checkout confirmations, check-in confirmations,
-// error messages all post to `user.id` repeatedly).
-const dmChannelCache = new Map();
+// ─── JOB SITES ────────────────────────────────────────
+router.get("/sites", (_req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  res.json(d.get("sites").value() || []);
+});
 
-// If `channel` is a raw user ID (starts with "U"), resolves it to the
-// bot's OWN DM channel with that user via conversations.open. Passing a
-// raw user ID straight to chat.postMessage does NOT error — Slack
-// silently accepts it and routes the message into that user's DM with
-// Slackbot instead of with this app. `ok: true` comes back either way,
-// so this bug produces no error, no log line, nothing — the message
-// just lands somewhere the recipient never thinks to check.
-async function resolveChannel(channel) {
-  if (!channel || channel[0] !== "U") return channel; // already a channel/group/DM id — pass through
-  if (dmChannelCache.has(channel)) return dmChannelCache.get(channel);
+router.post("/sites", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  if (!d.has("sites").value()) d.set("sites", []).write();
+  d.get("sites").push(req.body).write();
+  res.status(201).json(req.body);
+});
 
+router.put("/sites/:name", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  const site = d.get("sites").find({ name: decodeURIComponent(req.params.name) }).value();
+  if (!site) return res.status(404).json({ error: "Site not found" });
+  d.get("sites").find({ name: decodeURIComponent(req.params.name) }).assign(req.body).write();
+  res.json(d.get("sites").find({ name: req.body.name || decodeURIComponent(req.params.name) }).value());
+});
+
+router.delete("/sites/:name", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  d.get("sites").remove({ name: decodeURIComponent(req.params.name) }).write();
+  res.json({ deleted: true });
+});
+
+// ─── SLACK NOTIFY HELPERS ─────────────────────────────
+async function getBrentDmChannel(slackToken) {
+  const userId = process.env.BRENT_SLACK_ID;
+  if (!userId) return null;
   try {
-    const res = await axios.post(
-      `${SLACK_API}/conversations.open`,
-      { users: channel },
-      { headers: getHeaders() }
-    );
-    if (!res.data.ok) {
-      console.error("conversations.open failed for", channel, ":", res.data.error);
-      return null;
-    }
-    const dmId = res.data.channel.id;
-    dmChannelCache.set(channel, dmId);
-    return dmId;
+    const r = await fetch("https://slack.com/api/conversations.open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+      body: JSON.stringify({ users: userId })
+    });
+    const data = await r.json();
+    if (data.ok) return data.channel.id;
+    console.error("[slack] conversations.open failed:", data.error);
+    return null;
   } catch (e) {
-    console.error("conversations.open error for", channel, ":", e.message);
+    console.error("[slack] conversations.open error:", e.message);
     return null;
   }
 }
 
-// Open a modal triggered from a slash command or button click
-async function openModal(triggerId, view) {
-  const res = await axios.post(
-    `${SLACK_API}/views.open`,
-    { trigger_id: triggerId, view },
-    { headers: getHeaders() }
-  );
-  if (!res.data.ok) {
-    console.error("views.open failed:", res.data.error);
-    throw new Error(res.data.error);
-  }
-  return res.data;
-}
+const TYPE_LABEL = { delivery: "Material Delivery", pickup: "Tool Pickup", "tool-delivery": "Tool Delivery", misc: "Misc Task" };
 
-// Post a message to a channel — or to a user's DM, transparently.
-// Pass either a real channel/group/DM ID (starts with C, G, or D) or a
-// raw user ID (starts with U); user IDs are resolved to a real DM
-// channel automatically before posting.
-async function postMessage(channel, payload) {
-  const resolved = await resolveChannel(channel);
-  if (!resolved) {
-    console.error("chat.postMessage skipped — could not resolve destination for", channel);
-    return { ok: false, error: "channel_resolution_failed" };
-  }
-  const res = await axios.post(
-    `${SLACK_API}/chat.postMessage`,
-    { channel: resolved, ...payload },
-    { headers: getHeaders() }
-  );
-  if (!res.data.ok) {
-    console.error("chat.postMessage failed:", res.data.error);
-  }
-  return res.data;
-}
+// ─── DISPATCH BOOKINGS ────────────────────────────────────────
+router.get("/bookings", (_req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  res.json(d.get("bookings").value() || []);
+});
 
-// Post an ephemeral message (only visible to one user).
-// `channel` here is always a real channel ID supplied by Slack itself
-// (the channel a slash command or button click happened in), never a
-// raw user ID we constructed — no resolution needed.
-async function postEphemeral(channel, userId, payload) {
-  const res = await axios.post(
-    `${SLACK_API}/chat.postEphemeral`,
-    { channel, user: userId, ...payload },
-    { headers: getHeaders() }
-  );
-  if (!res.data.ok) {
-    console.error("chat.postEphemeral failed:", res.data.error);
+router.post("/bookings", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  const booking = { id: uid(), status: "pending", createdAt: new Date().toISOString(), ...req.body };
+  if (!d.has("bookings").value()) d.set("bookings", []).write();
+  d.get("bookings").push(booking).write();
+
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  if (slackToken) {
+    getBrentDmChannel(slackToken).then((brentChannel) => {
+      const channel = brentChannel || process.env.SLACK_MANAGER_CHANNEL_ID;
+      if (!channel) return;
+      const typeLabel = TYPE_LABEL[booking.type] || booking.type;
+      const typeEmoji = { delivery:"📦", pickup:"🔧", "tool-delivery":"🚚", misc:"📝" }[booking.type] || "📋";
+      const priorityText = booking.priority === "urgent" ? "🚨 *URGENT*" : booking.priority === "scheduled" ? "📅 Planned" : "📋 Normal";
+      return fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+        body: JSON.stringify({
+          channel: channel,
+          text: `${typeEmoji} New booking request from ${booking.requester}`,
+          blocks: [
+            { type: "header", text: { type: "plain_text", text: `${typeEmoji} New Dispatch Request` } },
+            { type: "section", fields: [
+              { type: "mrkdwn", text: `*Type:*\n${typeLabel}` },
+              { type: "mrkdwn", text: `*From:*\n${booking.requester}` },
+              { type: "mrkdwn", text: `*Site:*\n${booking.site || "TBD"}` },
+              { type: "mrkdwn", text: `*Date:*\n${booking.date}${booking.time ? " at " + booking.time : ""}` },
+              { type: "mrkdwn", text: `*Priority:*\n${priorityText}` },
+            ]},
+            { type: "section", text: { type: "mrkdwn", text: `*Description:*\n${booking.description}` } },
+            { type: "actions", elements: [
+              { type: "button", text: { type: "plain_text", text: "✅ Approve" }, style: "primary", action_id: "approve_booking", value: booking.id },
+              { type: "button", text: { type: "plain_text", text: "❌ Decline" }, style: "danger", action_id: "decline_booking", value: booking.id },
+            ]}
+          ]
+        })
+      }).then(r => r.json()).then(data => {
+        if (!data.ok) console.error("[slack] chat.postMessage (new booking) failed:", data.error);
+      });
+    }).catch(e => console.error("[slack] notify new booking error:", e.message));
   }
-  return res.data;
-}
 
-// Respond to a slash command's response_url (immediate reply)
-async function respondToCommand(responseUrl, payload) {
-  await axios.post(responseUrl, payload);
-}
+  res.status(201).json(booking);
+});
 
-module.exports = { openModal, postMessage, postEphemeral, respondToCommand };
+router.put("/bookings/:id", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  const booking = d.get("bookings").find({ id: req.params.id }).value();
+  if (!booking) return res.status(404).json({ error: "Booking not found" });
+  d.get("bookings").find({ id: req.params.id }).assign({ ...req.body, updatedAt: new Date().toISOString() }).write();
+  const updated = d.get("bookings").find({ id: req.params.id }).value();
+
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const channel = process.env.SLACK_MANAGER_CHANNEL_ID;
+  if (slackToken && channel && req.body.status) {
+    const typeLabel = TYPE_LABEL[booking.type] || booking.type;
+    const msgs = {
+      approved: `✅ Booking approved by Brent: ${typeLabel} for ${booking.site} on ${booking.date}`,
+      declined: `❌ Booking declined: ${typeLabel} for ${booking.site}${req.body.brentNotes ? " — " + req.body.brentNotes : ""}`,
+      completed: `🏁 Job completed by Brent: ${typeLabel} for ${booking.site}`,
+      "in-progress": `🔄 Brent is on the way: ${typeLabel} for ${booking.site}`
+    };
+    if (msgs[req.body.status]) {
+      fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+        body: JSON.stringify({ channel, text: msgs[req.body.status] })
+      }).then(r => r.json()).then(data => {
+        if (!data.ok) console.error("[slack] chat.postMessage (status update) failed:", data.error);
+      }).catch(e => console.error("[slack] notify status update error:", e.message));
+    }
+  }
+  res.json(updated);
+});
+
+router.delete("/bookings/:id", (req, res) => {
+  const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+  const d = low(new FileSync(process.env.DB_PATH||"./data/db.json"));
+  d.get("bookings").remove({ id: req.params.id }).write();
+  res.json({ deleted: true });
+});
+
+module.exports = router;
