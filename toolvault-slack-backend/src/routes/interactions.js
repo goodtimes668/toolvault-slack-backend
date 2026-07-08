@@ -3,6 +3,7 @@
 // Handles Slack interactive payloads:
 //   - Modal form submissions (checkout, check-in)
 //   - Button clicks from dashboard messages
+//   - Button clicks from dispatch booking notifications
 // ─────────────────────────────────────────────────────────────
 
 const express = require("express");
@@ -15,6 +16,8 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2);
 }
 
+const TYPE_LABEL = { delivery: "Material Delivery", pickup: "Tool Pickup", "tool-delivery": "Tool Delivery", misc: "Misc Task" };
+
 // POST /slack/interactions
 router.post("/", async (req, res) => {
   let payload;
@@ -24,7 +27,7 @@ router.post("/", async (req, res) => {
     return res.status(400).send("Invalid payload");
   }
 
-  const { type, callback_id, trigger_id, user, channel, actions } = payload;
+  const { type, callback_id, trigger_id, user, channel, message, actions } = payload;
 
   // ── Block action (button click) ────────────────────────────
   if (type === "block_actions") {
@@ -63,6 +66,74 @@ router.post("/", async (req, res) => {
         const tools = db.getAllTools();
         const msgPayload = blocks.buildRentalList(rentals, tools);
         await slack.postEphemeral(channel?.id, user.id, msgPayload);
+      }
+
+      // ── Dispatch booking Approve/Decline ─────────────────
+      if (action.action_id === "approve_booking" || action.action_id === "decline_booking") {
+        const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+        const d = low(new FileSync(process.env.DB_PATH || "./data/db.json"));
+        const bookingId = action.value;
+        const booking = d.get("bookings").find({ id: bookingId }).value();
+
+        if (!booking) {
+          await slack.postEphemeral(channel?.id, user.id, {
+            text: "⚠️ Booking not found — it may have already been deleted.",
+          });
+          return;
+        }
+
+        if (booking.status !== "pending") {
+          await slack.postEphemeral(channel?.id, user.id, {
+            text: `ℹ️ This booking is already marked *${booking.status}* — no change made.`,
+          });
+          return;
+        }
+
+        const newStatus = action.action_id === "approve_booking" ? "approved" : "declined";
+        d.get("bookings").find({ id: bookingId }).assign({
+          status: newStatus,
+          updatedAt: new Date().toISOString(),
+          approvedViaSlack: true,
+        }).write();
+
+        const typeLabel = TYPE_LABEL[booking.type] || booking.type;
+
+        // Swap the buttons on the original message for a static result —
+        // stops Brent from being able to tap Approve then Decline after.
+        try {
+          const updateRes = await fetch("https://slack.com/api/chat.update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}` },
+            body: JSON.stringify({
+              channel: channel.id,
+              ts: message.ts,
+              text: (newStatus === "approved" ? "✅ Approved" : "❌ Declined") + ` — ${typeLabel} for ${booking.site || "TBD"}`,
+              blocks: [
+                { type: "section", text: { type: "mrkdwn",
+                  text: (newStatus === "approved" ? "✅ *Approved*" : "❌ *Declined*") +
+                        ` by <@${user.id}>\n${typeLabel} for *${booking.site || "TBD"}* — ${booking.date}`
+                }}
+              ]
+            })
+          });
+          const updateData = await updateRes.json();
+          if (!updateData.ok) console.error("[slack] chat.update after booking decision failed:", updateData.error);
+        } catch (e) {
+          console.error("[slack] chat.update after booking decision error:", e.message);
+        }
+
+        // Let the crew channel know, same wording as the app's own status-change notice
+        const crewChannel = process.env.SLACK_MANAGER_CHANNEL_ID;
+        if (crewChannel) {
+          const msg = newStatus === "approved"
+            ? `✅ Booking approved by Brent: ${typeLabel} for ${booking.site} on ${booking.date}`
+            : `❌ Booking declined: ${typeLabel} for ${booking.site}`;
+          try {
+            await slack.postMessage(crewChannel, { text: msg });
+          } catch (e) {
+            console.error("[slack] crew notify after booking decision error:", e.message);
+          }
+        }
       }
     } catch (err) {
       console.error("block_action error:", err.message);
