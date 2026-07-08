@@ -98,8 +98,6 @@ router.post("/", async (req, res) => {
 
         const typeLabel = TYPE_LABEL[booking.type] || booking.type;
 
-        // Swap the buttons on the original message for a static result —
-        // stops Brent from being able to tap Approve then Decline after.
         try {
           const updateRes = await fetch("https://slack.com/api/chat.update", {
             method: "POST",
@@ -122,7 +120,6 @@ router.post("/", async (req, res) => {
           console.error("[slack] chat.update after booking decision error:", e.message);
         }
 
-        // Let the crew channel know, same wording as the app's own status-change notice
         const crewChannel = process.env.SLACK_MANAGER_CHANNEL_ID;
         if (crewChannel) {
           const msg = newStatus === "approved"
@@ -159,7 +156,6 @@ router.post("/", async (req, res) => {
       const notes = vals.notes?.notes_text?.value || "";
       const signature = vals.signature?.sig?.value;
 
-      // Validate required fields
       if (!toolId || !checkedOutBy || !jobSite || !expectedReturn || !signature) {
         return res.status(200).json({
           response_action: "errors",
@@ -172,14 +168,12 @@ router.post("/", async (req, res) => {
         });
       }
 
-      // Dismiss modal
       res.status(200).json({ response_action: "clear" });
 
       try {
         const tool = db.getToolById(toolId);
         if (!tool) throw new Error("Tool not found");
 
-        // Check if tool is still available (race condition protection)
         const existingRental = db.getActiveRentalForTool(toolId);
         if (existingRental) throw new Error("Tool was just checked out by someone else");
 
@@ -204,12 +198,9 @@ router.post("/", async (req, res) => {
         db.addRental(rental);
         db.updateTool(toolId, { jobSite });
 
-        // Post confirmation to the channel where the command was used
-        // We post to the bot's DM with the user since we don't have channel context in modals
         const confirmation = blocks.checkoutConfirmation(tool, rental);
         await slack.postMessage(user.id, { ...confirmation, text: `✅ ${tool.name} checked out to ${checkedOutBy}` });
 
-        // Also log to alerts
         db.addAlert({
           id: uid(),
           type: "checkout",
@@ -264,7 +255,6 @@ router.post("/", async (req, res) => {
         const tool = db.getToolById(rental.toolId);
         if (!tool) throw new Error("Tool not found");
 
-        // Update rental
         db.updateRental(rentalId, {
           status: "returned",
           returnDate: new Date().toISOString(),
@@ -276,19 +266,16 @@ router.post("/", async (req, res) => {
           returnedBySlackUser: user.id,
         });
 
-        // Update tool condition
         db.updateTool(rental.toolId, {
           condition: returnCondition,
           damageFlagged,
           jobSite: damageFlagged ? tool.jobSite : "",
         });
 
-        // Post confirmation to user
         const updatedRental = { ...rental, returnCondition, damageFlagged, damageDesc, returnNotes };
         const confirmation = blocks.checkinConfirmation(tool, updatedRental);
         await slack.postMessage(user.id, { ...confirmation, text: `${damageFlagged ? "🚩" : "✅"} ${tool.name} checked in by ${rental.checkedOutBy}` });
 
-        // If damaged — send alert to manager channel
         if (damageFlagged) {
           const managerChannel = process.env.SLACK_MANAGER_CHANNEL_ID;
           if (managerChannel) {
@@ -323,7 +310,6 @@ router.post("/", async (req, res) => {
     }
   }
 
-  // Default 200 for unhandled interaction types
   res.status(200).send();
 });
 
