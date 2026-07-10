@@ -1,7 +1,8 @@
 // src/routes/interactions.js
 // ─────────────────────────────────────────────────────────────
 // Handles Slack interactive payloads:
-//   - Modal form submissions (checkout, check-in)
+//   - Global shortcut (lightning bolt) -> New Booking modal
+//   - Modal form submissions (checkout, check-in, new booking)
 //   - Button clicks from dashboard messages
 //   - Button clicks from dispatch booking notifications
 // ─────────────────────────────────────────────────────────────
@@ -18,6 +19,121 @@ function uid() {
 
 const TYPE_LABEL = { delivery: "Material Delivery", pickup: "Tool Pickup", "tool-delivery": "Tool Delivery", misc: "Misc Task" };
 
+// Same DM-resolution pattern already proven working in routes/api.js —
+// duplicated here on purpose rather than relying on slack.postMessage's
+// auto-resolution, since that fix's deployment was never confirmed.
+async function openDmWith(userId, slackToken) {
+  if (!userId) return null;
+  try {
+    const r = await fetch("https://slack.com/api/conversations.open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+      body: JSON.stringify({ users: userId })
+    });
+    const data = await r.json();
+    if (data.ok) return data.channel.id;
+    console.error("[slack] conversations.open failed for", userId, ":", data.error);
+    return null;
+  } catch (e) {
+    console.error("[slack] conversations.open error for", userId, ":", e.message);
+    return null;
+  }
+}
+
+function buildNewBookingModal(defaultRequester) {
+  return {
+    type: "modal",
+    callback_id: "booking_submit",
+    title: { type: "plain_text", text: "New Dispatch Request" },
+    submit: { type: "plain_text", text: "Submit" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "input",
+        block_id: "type_block",
+        label: { type: "plain_text", text: "Type" },
+        element: {
+          type: "static_select",
+          action_id: "type_select",
+          initial_option: { text: { type: "plain_text", text: "Material Delivery" }, value: "delivery" },
+          options: [
+            { text: { type: "plain_text", text: "Material Delivery" }, value: "delivery" },
+            { text: { type: "plain_text", text: "Tool Pickup" }, value: "pickup" },
+            { text: { type: "plain_text", text: "Tool Delivery" }, value: "tool-delivery" },
+            { text: { type: "plain_text", text: "Misc Task" }, value: "misc" }
+          ]
+        }
+      },
+      {
+        type: "input",
+        block_id: "requester_block",
+        label: { type: "plain_text", text: "Requested By" },
+        element: {
+          type: "plain_text_input",
+          action_id: "requester_input",
+          initial_value: defaultRequester || ""
+        }
+      },
+      {
+        type: "input",
+        block_id: "site_block",
+        label: { type: "plain_text", text: "Job Site" },
+        element: {
+          type: "plain_text_input",
+          action_id: "site_input",
+          placeholder: { type: "plain_text", text: "e.g. Grand & Fir" }
+        }
+      },
+      {
+        type: "input",
+        block_id: "desc_block",
+        label: { type: "plain_text", text: "Description" },
+        element: {
+          type: "plain_text_input",
+          action_id: "desc_input",
+          multiline: true,
+          placeholder: { type: "plain_text", text: "What needs to be picked up or delivered?" }
+        }
+      },
+      {
+        type: "input",
+        block_id: "date_block",
+        label: { type: "plain_text", text: "Date" },
+        element: { type: "datepicker", action_id: "date_input" }
+      },
+      {
+        type: "input",
+        block_id: "time_block",
+        optional: true,
+        label: { type: "plain_text", text: "Time (optional)" },
+        element: { type: "timepicker", action_id: "time_input" }
+      },
+      {
+        type: "input",
+        block_id: "priority_block",
+        label: { type: "plain_text", text: "Priority" },
+        element: {
+          type: "radio_buttons",
+          action_id: "priority_select",
+          initial_option: { text: { type: "plain_text", text: "Normal" }, value: "normal" },
+          options: [
+            { text: { type: "plain_text", text: "Urgent" }, value: "urgent" },
+            { text: { type: "plain_text", text: "Normal" }, value: "normal" },
+            { text: { type: "plain_text", text: "Planned" }, value: "scheduled" }
+          ]
+        }
+      },
+      {
+        type: "input",
+        block_id: "notes_block",
+        optional: true,
+        label: { type: "plain_text", text: "Notes (optional)" },
+        element: { type: "plain_text_input", action_id: "notes_input", multiline: true }
+      }
+    ]
+  };
+}
+
 // POST /slack/interactions
 router.post("/", async (req, res) => {
   let payload;
@@ -28,6 +144,20 @@ router.post("/", async (req, res) => {
   }
 
   const { type, callback_id, trigger_id, user, channel, message, actions } = payload;
+
+  // ── Global shortcut (lightning bolt) ────────────────────────
+  if (type === "shortcut") {
+    res.status(200).send();
+    if (callback_id === "new_booking_shortcut") {
+      try {
+        const modal = buildNewBookingModal(user.name);
+        await slack.openModal(trigger_id, modal);
+      } catch (err) {
+        console.error("new_booking_shortcut error:", err.message);
+      }
+    }
+    return;
+  }
 
   // ── Block action (button click) ────────────────────────────
   if (type === "block_actions") {
@@ -141,6 +271,109 @@ router.post("/", async (req, res) => {
 
   // ── View submission (modal form) ───────────────────────────
   if (type === "view_submission") {
+
+    // ── New Booking Modal Submitted (from lightning-bolt shortcut) ──
+    if (callback_id === "booking_submit") {
+      const vals = payload.view.state.values;
+      const bookingType = vals.type_block?.type_select?.selected_option?.value;
+      const requester = vals.requester_block?.requester_input?.value;
+      const site = vals.site_block?.site_input?.value;
+      const description = vals.desc_block?.desc_input?.value;
+      const date = vals.date_block?.date_input?.selected_date;
+      const time = vals.time_block?.time_input?.selected_time || "";
+      const priority = vals.priority_block?.priority_select?.selected_option?.value;
+      const notes = vals.notes_block?.notes_input?.value || "";
+
+      if (!requester || !description || !date) {
+        return res.status(200).json({
+          response_action: "errors",
+          errors: {
+            ...(!requester && { requester_block: "Please enter who this is for." }),
+            ...(!description && { desc_block: "Please describe what's needed." }),
+            ...(!date && { date_block: "Please pick a date." }),
+          },
+        });
+      }
+
+      res.status(200).json({ response_action: "clear" });
+
+      try {
+        const low = require("lowdb"); const FileSync = require("lowdb/adapters/FileSync");
+        const d = low(new FileSync(process.env.DB_PATH || "./data/db.json"));
+        const booking = {
+          id: uid(),
+          type: bookingType || "delivery",
+          requester,
+          site: site || "",
+          description,
+          date,
+          time,
+          priority: priority || "normal",
+          notes,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          createdViaSlack: true,
+        };
+        if (!d.has("bookings").value()) d.set("bookings", []).write();
+        d.get("bookings").push(booking).write();
+
+        const slackToken = process.env.SLACK_BOT_TOKEN;
+        const typeLabel = TYPE_LABEL[booking.type] || booking.type;
+
+        if (slackToken) {
+          // Confirm to whoever submitted it, in their own DM
+          const selfChannel = await openDmWith(user.id, slackToken);
+          if (selfChannel) {
+            const confirmRes = await fetch("https://slack.com/api/chat.postMessage", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+              body: JSON.stringify({ channel: selfChannel, text: `✅ Booking submitted: ${typeLabel} for ${booking.site || "TBD"}` })
+            });
+            const confirmData = await confirmRes.json();
+            if (!confirmData.ok) console.error("[slack] confirm DM (shortcut booking) failed:", confirmData.error);
+          }
+
+          // Notify Brent — same DM-resolution + card as the web app's own POST /bookings
+          const brentChannel = await openDmWith(process.env.BRENT_SLACK_ID, slackToken);
+          const dest = brentChannel || process.env.SLACK_MANAGER_CHANNEL_ID;
+          if (dest) {
+            const typeEmoji = { delivery:"📦", pickup:"🔧", "tool-delivery":"🚚", misc:"📝" }[booking.type] || "📋";
+            const priorityText = booking.priority === "urgent" ? "🚨 *URGENT*" : booking.priority === "scheduled" ? "📅 Planned" : "📋 Normal";
+            const notifyRes = await fetch("https://slack.com/api/chat.postMessage", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
+              body: JSON.stringify({
+                channel: dest,
+                text: `${typeEmoji} New booking request from ${booking.requester}`,
+                blocks: [
+                  { type: "header", text: { type: "plain_text", text: `${typeEmoji} New Dispatch Request` } },
+                  { type: "section", fields: [
+                    { type: "mrkdwn", text: `*Type:*\n${typeLabel}` },
+                    { type: "mrkdwn", text: `*From:*\n${booking.requester}` },
+                    { type: "mrkdwn", text: `*Site:*\n${booking.site || "TBD"}` },
+                    { type: "mrkdwn", text: `*Date:*\n${booking.date}${booking.time ? " at " + booking.time : ""}` },
+                    { type: "mrkdwn", text: `*Priority:*\n${priorityText}` },
+                  ]},
+                  { type: "section", text: { type: "mrkdwn", text: `*Description:*\n${booking.description}` } },
+                  { type: "actions", elements: [
+                    { type: "button", text: { type: "plain_text", text: "✅ Approve" }, style: "primary", action_id: "approve_booking", value: booking.id },
+                    { type: "button", text: { type: "plain_text", text: "❌ Decline" }, style: "danger", action_id: "decline_booking", value: booking.id },
+                  ]}
+                ]
+              })
+            });
+            const notifyData = await notifyRes.json();
+            if (!notifyData.ok) console.error("[slack] chat.postMessage (shortcut new booking) failed:", notifyData.error);
+          }
+        }
+
+        console.log(`✅ Booking created via Slack shortcut: ${booking.type} for ${booking.site}`);
+      } catch (err) {
+        console.error("booking_submit error:", err.message);
+      }
+
+      return;
+    }
 
     // ── Checkout Modal Submitted ────────────────────────────
     if (callback_id === "checkout_submit") {
