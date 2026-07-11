@@ -114,6 +114,7 @@ router.post("/bookings", (req, res) => {
             { type: "actions", elements: [
               { type: "button", text: { type: "plain_text", text: "✅ Approve" }, style: "primary", action_id: "approve_booking", value: booking.id },
               { type: "button", text: { type: "plain_text", text: "❌ Decline" }, style: "danger", action_id: "decline_booking", value: booking.id },
+              { type: "button", text: { type: "plain_text", text: "🔗 Open in Dispatch" }, url: "https://gtmann-dispatch.netlify.app/", action_id: "open_dispatch_app" },
             ]}
           ]
         })
