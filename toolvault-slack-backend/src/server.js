@@ -1,14 +1,20 @@
 require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
-const { verifySlackSignature } = require("./slack/verify");
+const { verifySlackSignature, createSlackVerifier } = require("./slack/verify");
 const commandsRouter = require("./routes/commands");
 const interactionsRouter = require("./routes/interactions");
+const dispatchInteractionsRouter = require("./routes/dispatch-interactions");
 const apiRouter = require("./routes/api");
 const { startOverdueChecker } = require("./jobs/overdueChecker");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// GT Mann Dispatch is a separate Slack app from ToolVault Pro, so it
+// has its own signing secret — verified independently, not reusing
+// ToolVault's verifySlackSignature.
+const verifyDispatchSignature = createSlackVerifier(process.env.DISPATCH_SLACK_SIGNING_SECRET);
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -25,11 +31,12 @@ app.get("/health", (_req, res) => { res.json({ status: "ok", service: "ToolVault
 app.use("/api", apiRouter);
 app.use("/slack/commands", verifySlackSignature, commandsRouter);
 app.use("/slack/interactions", verifySlackSignature, interactionsRouter);
+app.use("/slack/dispatch-interactions", verifyDispatchSignature, dispatchInteractionsRouter);
 app.use((_req, res) => { res.status(404).json({ error: "Not found" }); });
 app.use((err, _req, res, _next) => { console.error(err.message); res.status(500).json({ error: "Internal server error" }); });
 
 app.listen(PORT, () => {
-  console.log("ToolVault Pro running on port " + PORT);
+  console.log(`ToolVault Pro running on port ${PORT}`);
   if (process.env.SLACK_MANAGER_CHANNEL_ID) startOverdueChecker();
 });
 
