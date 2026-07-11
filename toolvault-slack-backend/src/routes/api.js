@@ -50,6 +50,8 @@ router.delete("/sites/:name", (req, res) => {
 });
 
 // ─── SLACK NOTIFY HELPERS ─────────────────────────────
+// Dispatch is now its own Slack app — uses DISPATCH_SLACK_BOT_TOKEN,
+// never SLACK_BOT_TOKEN (that one's ToolVault Pro's, kept separate).
 async function getBrentDmChannel(slackToken) {
   const userId = process.env.BRENT_SLACK_ID;
   if (!userId) return null;
@@ -61,10 +63,10 @@ async function getBrentDmChannel(slackToken) {
     });
     const data = await r.json();
     if (data.ok) return data.channel.id;
-    console.error("[slack] conversations.open failed:", data.error);
+    console.error("[dispatch] conversations.open failed:", data.error);
     return null;
   } catch (e) {
-    console.error("[slack] conversations.open error:", e.message);
+    console.error("[dispatch] conversations.open error:", e.message);
     return null;
   }
 }
@@ -85,7 +87,7 @@ router.post("/bookings", (req, res) => {
   if (!d.has("bookings").value()) d.set("bookings", []).write();
   d.get("bookings").push(booking).write();
 
-  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const slackToken = process.env.DISPATCH_SLACK_BOT_TOKEN;
   if (slackToken) {
     getBrentDmChannel(slackToken).then((brentChannel) => {
       const channel = brentChannel || process.env.SLACK_MANAGER_CHANNEL_ID;
@@ -116,9 +118,9 @@ router.post("/bookings", (req, res) => {
           ]
         })
       }).then(r => r.json()).then(data => {
-        if (!data.ok) console.error("[slack] chat.postMessage (new booking) failed:", data.error);
+        if (!data.ok) console.error("[dispatch] chat.postMessage (new booking) failed:", data.error);
       });
-    }).catch(e => console.error("[slack] notify new booking error:", e.message));
+    }).catch(e => console.error("[dispatch] notify new booking error:", e.message));
   }
 
   res.status(201).json(booking);
@@ -132,7 +134,7 @@ router.put("/bookings/:id", (req, res) => {
   d.get("bookings").find({ id: req.params.id }).assign({ ...req.body, updatedAt: new Date().toISOString() }).write();
   const updated = d.get("bookings").find({ id: req.params.id }).value();
 
-  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const slackToken = process.env.DISPATCH_SLACK_BOT_TOKEN;
   const channel = process.env.SLACK_MANAGER_CHANNEL_ID;
   if (slackToken && channel && req.body.status) {
     const typeLabel = TYPE_LABEL[booking.type] || booking.type;
@@ -148,8 +150,8 @@ router.put("/bookings/:id", (req, res) => {
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${slackToken}` },
         body: JSON.stringify({ channel, text: msgs[req.body.status] })
       }).then(r => r.json()).then(data => {
-        if (!data.ok) console.error("[slack] chat.postMessage (status update) failed:", data.error);
-      }).catch(e => console.error("[slack] notify status update error:", e.message));
+        if (!data.ok) console.error("[dispatch] chat.postMessage (status update) failed:", data.error);
+      }).catch(e => console.error("[dispatch] notify status update error:", e.message));
     }
   }
   res.json(updated);
